@@ -139,5 +139,186 @@ public class Arena2DEnvironment extends Environment {
         return percepts;
     }
 
+    @Override
+    public boolean executeAction(final String ag, final Structure action) {
+        initializeAgentIfNeeded(ag);
+        boolean result = false;
+
+        String functor = action.getFunctor();
+
+        if (action.equals(moveRandom)) {
+            Direction rd = Direction.random();
+            Orientation direction = model.getAgentDirection(ag).rotate(rd);
+            Vector2D destination = model.getAgentPosition(ag).afterStep(1, direction);
+            boolean civilian = ag.startsWith("civilian");
+            if (!civilian || (!model.getFires().contains(destination) && !model.isStationPosition(destination))) {
+                result = model.moveAgent(ag, 1, rd);
+            }
+        }
+        else if (functor.equals("move")) {
+            try {
+                int fromX = (int) ((jason.asSyntax.NumberTerm) action.getTerm(0)).solve();
+                int fromY = (int) ((jason.asSyntax.NumberTerm) action.getTerm(1)).solve();
+                int toX = (int) ((jason.asSyntax.NumberTerm) action.getTerm(2)).solve();
+                int toY = (int) ((jason.asSyntax.NumberTerm) action.getTerm(3)).solve();
+                int fireX = (int) ((jason.asSyntax.NumberTerm) action.getTerm(4)).solve();
+                int fireY = (int) ((jason.asSyntax.NumberTerm) action.getTerm(5)).solve();
+                result = moveOneStep(ag, Vector2D.of(fromX, fromY), Vector2D.of(toX, toY),
+                        Vector2D.of(fireX, fireY));
+            } catch (Exception e) {
+                logger.warning("Errore nel parsing dell'azione di movimento: " + e.getMessage());
+            }
+        }
+        else if (functor.equals("move_towards")) {
+            try {
+                int x = (int) ((jason.asSyntax.NumberTerm) action.getTerm(0)).solve();
+                int y = (int) ((jason.asSyntax.NumberTerm) action.getTerm(1)).solve();
+                result = moveTowards(ag, Vector2D.of(x, y));
+            } catch (Exception e) {
+                logger.warning("Errore nel parsing della destinazione: " + e.getMessage());
+            }
+        }
+        else if (functor.equals("report_fire")) {
+            try {
+                int x = (int) ((jason.asSyntax.NumberTerm) action.getTerm(0)).solve();
+                int y = (int) ((jason.asSyntax.NumberTerm) action.getTerm(1)).solve();
+                Vector2D firePosition = Vector2D.of(x, y);
+                Vector2D callerPosition = model.getAgentPosition(ag);
+                int distanceX = Math.abs(callerPosition.getX() - x);
+                int distanceY = Math.abs(callerPosition.getY() - y);
+                result = Math.max(distanceX, distanceY) == 1
+                        && model.getAgentByPosition(firePosition).isEmpty()
+                        && model.addFire(firePosition);
+            } catch (Exception e) {
+                logger.warning("Errore nel parsing delle coordinate del fuoco: " + e.getMessage());
+            }
+        }
+        else if (functor.equals("extinguish")) {
+            try {
+                int x = (int) ((jason.asSyntax.NumberTerm) action.getTerm(0)).solve();
+                int y = (int) ((jason.asSyntax.NumberTerm) action.getTerm(1)).solve();
+                result = model.getAgentPosition(ag).equals(Vector2D.of(x, y))
+                        && model.extinguishFire(ag);
+            } catch (Exception e) {
+                logger.warning("Errore nel parsing delle coordinate dello spegnimento: " + e.getMessage());
+            }
+        }
+        else if (functor.equals("refill")) {
+            result = model.refillWater(ag);
+        }
+        else if (functor.equals("reserve_fire")) {
+            try {
+                int x = (int) ((jason.asSyntax.NumberTerm) action.getTerm(0)).solve();
+                int y = (int) ((jason.asSyntax.NumberTerm) action.getTerm(1)).solve();
+                result = model.reserveFire(Vector2D.of(x, y));
+            } catch (Exception e) {
+                logger.warning("Errore nel parsing della riserva del fuoco: " + e.getMessage());
+            }
+        }
+        else if (functor.equals("release_fire")) {
+            try {
+                int x = (int) ((jason.asSyntax.NumberTerm) action.getTerm(0)).solve();
+                int y = (int) ((jason.asSyntax.NumberTerm) action.getTerm(1)).solve();
+                result = model.releaseFire(Vector2D.of(x, y));
+            } catch (Exception e) {
+                logger.warning("Errore nel parsing del rilascio del fuoco: " + e.getMessage());
+            }
+        }
+        else {
+            logger.warning("Impossibile gestire l'azione: " + action);
+        }
+
+        try {
+            long delay = model.getActionDelayMillis();
+            if (ag.startsWith("firefighter")) {
+                delay = Math.max(8, delay / 2);
+            }
+            Thread.sleep(delay);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+
+        informAgentsOfPerceptChanges();
+        notifyModelChangedToView();
+        return result;
+    }
+
+    private void informAgentsOfPerceptChanges() {
+        informAgsEnvironmentChanged(model.getAllAgents().toArray(new String[0]));
+    }
+
+    private boolean moveTowards(String agent, Vector2D destination) {
+        if (!model.isPositionInside(destination)) {
+            return false;
+        }
+
+        Vector2D start = model.getAgentPosition(agent);
+        if (start.equals(destination)) {
+            return true;
+        }
+
+        ArrayDeque<Vector2D> queue = new ArrayDeque<>();
+        Map<Vector2D, Vector2D> previous = new HashMap<>();
+        queue.add(start);
+        previous.put(start, start);
+
+        while (!queue.isEmpty() && !previous.containsKey(destination)) {
+            Vector2D current = queue.removeFirst();
+            for (Orientation orientation : Orientation.values()) {
+                Vector2D next = current.afterStep(1, orientation);
+                if (!model.isPositionInside(next) || previous.containsKey(next)) {
+                    continue;
+                }
+                if (agent.startsWith("civilian") && model.isStationPosition(next)) {
+                    continue;
+                }
+                if (model.getFires().contains(next)) {
+                    continue;
+                }
+                if (!next.equals(destination)
+                        && model.getAgentByPosition(next).filter(other -> !other.equals(agent)).isPresent()) {
+                    continue;
+                }
+                previous.put(next, current);
+                queue.addLast(next);
+            }
+        }
+
+        if (!previous.containsKey(destination)) {
+            return false;
+        }
+
+        Vector2D nextStep = destination;
+        while (!previous.get(nextStep).equals(start)) {
+            nextStep = previous.get(nextStep);
+        }
+
+        Vector2D step = nextStep.minus(start);
+        Orientation orientation = orientationFor(step);
+        return model.setAgentPose(agent, nextStep, orientation);
+    }
+
+    private boolean moveOneStep(String agent, Vector2D origin, Vector2D destination, Vector2D targetFire) {
+        if (!agent.startsWith("firefighter")
+                || !model.getAgentPosition(agent).equals(origin)
+                || !model.isPositionInside(destination)
+                || origin.equals(destination)
+                || Math.abs(origin.getX() - destination.getX()) > 1
+                || Math.abs(origin.getY() - destination.getY()) > 1
+                || (model.getFires().contains(destination) && !destination.equals(targetFire))) {
+            return false;
+        }
+
+        return model.setAgentPose(agent, destination, orientationFor(destination.minus(origin)));
+    }
+
+    private Orientation orientationFor(Vector2D step) {
+        for (Orientation orientation : Orientation.values()) {
+            if (orientation.asVector().equals(step)) {
+                return orientation;
+            }
+        }
+        throw new IllegalArgumentException("Invalid movement step: " + step);
+    }
 
 }
